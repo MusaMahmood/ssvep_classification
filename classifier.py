@@ -1,20 +1,38 @@
 import glob
+import os
+
 import numpy as np
 import pandas as pd
-from scipy.io import loadmat
+from keras.layers import Dense, Dropout, Flatten, Conv1D
 from keras.models import Sequential
-from keras.layers import Dense, Dropout, Flatten, LeakyReLU, Conv1D, Conv2D
-from keras.optimizers import Adam
-# from keras.utils.vis_utils import plot_model
-
+from keras.models import load_model
+from scipy.io import loadmat
+from scipy.io import savemat
 # y generally needs to be one hot, but that is done in preprocessing (to_categorical)
 from sklearn.model_selection import train_test_split
 
+import tf_shared_k as tfs
+
 data_directory = 'time_domain_hpf_new/w'
 # Options
-win_len = 256
+win_len = 512
 # Hyperparams
 train_ratio = 0.75
+DATASET = 'ssvep_' + str(win_len)
+
+description = DATASET + '_annotate'
+keras_model_name = description + '.h5'
+model_dir = tfs.prep_dir('model_exports/')
+keras_file_location = model_dir + keras_model_name
+# Start Timer:
+start_time_ms = tfs.current_time_ms()
+
+# Setup:
+TRAIN = False
+TEST = True
+SAVE_PREDICTIONS = False
+SAVE_HIDDEN = True
+# EXPORT_OPT_BINARY = False
 
 
 def load_data(data_directory, image_shape, key_x, key_y):
@@ -31,9 +49,15 @@ def load_data(data_directory, image_shape, key_x, key_y):
 
     print("Loaded Data Shape: X:", x_train_data.shape, " Y: ", y_train_data.shape)
 
-    x_train, x_test, y_train, y_test = train_test_split(x_train_data, y_train_data, train_size=train_ratio)
+    x_train, x_test, y_train, y_test = train_test_split(x_train_data, y_train_data, train_size=train_ratio,
+                                                        random_state=1)
     return x_train, y_train, x_test, y_test
 
+
+#
+batch_size = 256
+epochs = 60
+output_folder = 'data_out/' + description + '/'
 
 # To load the data:
 input_shape = [2, win_len]
@@ -63,17 +87,58 @@ def build_model():
     return model
 
 
-#
-model = build_model()
-"""
-with open('modelNote.txt', 'a') as file:
-    modelNote = model.to_yaml()
-    file.write('\n\n')
-    file.write(modelNote)
-"""
-print(model.summary())
-model.fit(x_train, y_train, epochs=100, batch_size=256)
-score = model.evaluate(x_test, y_test, batch_size=16)
-# model.save("my_model.h")
-# plot_model(model, to_file='model.png')
-print(score)
+model = []
+# tf_backend.set_session(tfs.get_session(0.75))
+# with tf.device('/gpu:0'):
+if TRAIN:
+    if os.path.isfile(keras_file_location):
+        model = load_model(keras_file_location)
+    else:
+        model = build_model()
+    print(model.summary())
+
+    model.fit(x_train, y_train, batch_size=batch_size, epochs=epochs, verbose=1)
+    model.save(keras_file_location)
+
+if os.path.isfile(keras_file_location):
+    if not TRAIN:
+        model = load_model(keras_file_location)
+        print(model.summary())
+        if TEST:
+            score, acc = model.evaluate(x_test, y_test, batch_size=128, verbose=1)
+            print('Test score: {} , Test accuracy: {}'.format(score, acc))
+            y_prob = model.predict(x_test)
+            tfs.print_confusion_matrix_v2(y_prob, y_test)
+    else:
+        if TEST and model is not None:
+            score, acc = model.evaluate(x_test, y_test, batch_size=128, verbose=1)
+            print('Test score: {} , Test accuracy: {}'.format(score, acc))
+            y_prob = model.predict(x_test)
+            tfs.print_confusion_matrix_v2(y_prob, y_test)
+        else:
+            print('This should never happen: model does not exist')
+            exit(-1)
+else:
+    print("Model Not Found!")
+    if not TRAIN:
+        exit(-1)
+
+if SAVE_PREDICTIONS:
+    # predict
+    yy_probabilities = model.predict(x_test, batch_size=batch_size)
+    yy_predicted = tfs.maximize_output_probabilities_v2(yy_probabilities)
+    data_dict = {'x_val': x_test, 'y_val': y_test, 'y_prob': yy_probabilities, 'y_out': yy_predicted}
+    savemat(tfs.prep_dir(output_folder) + description + '.mat', mdict=data_dict)
+
+if SAVE_HIDDEN:
+    layers_of_interest = ['conv1d_1', 'conv1d_2', 'flatten_1', 'dense_1', 'dense_2']
+    # np.random.seed(0)
+    # rand_indices = np.random.randint(0, x_test.shape[0], 250)
+    print('Saving hidden layers: ', layers_of_interest)
+    tfs.get_keras_layers(model, layers_of_interest, x_test, y_test,
+                         output_dir=tfs.prep_dir(output_folder + '/hidden/'),
+                         fname='h_' + description + '.mat')
+
+# TODO: Save hidden Layers
+print('Elapsed Time (ms): ', tfs.current_time_ms() - start_time_ms)
+print('Elapsed Time (min): ', (tfs.current_time_ms() - start_time_ms) / 60000)
